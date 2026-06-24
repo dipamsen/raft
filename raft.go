@@ -55,8 +55,12 @@ type Raft struct {
 	requestVoteCh   chan RequestVoteEvent
 	clientCommandCh chan ClientCommandEvent
 	voteResult      chan VoteResult
+	stopCh          chan struct{}
+	stopped         bool
 }
 
+// Creates a new Raft node with the given id and peer ids.
+// It initializes internal state, timers, and channels.
 func NewRaft(id uint64, peers []uint64) *Raft {
 	r := &Raft{
 		id:              id,
@@ -74,17 +78,20 @@ func NewRaft(id uint64, peers []uint64) *Raft {
 		requestVoteCh:   make(chan RequestVoteEvent, 100),
 		clientCommandCh: make(chan ClientCommandEvent, 100),
 		voteResult:      make(chan VoteResult, len(peers)),
+		stopCh:          make(chan struct{}),
 	}
 	r.electionTimer = time.NewTimer(r.randomElectionTimeout())
 	return r
 }
 
+// Assigns the network implementation used to route RPCs for this Raft node.
 func (r *Raft) SetNetwork(net Network) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.net = net
 }
 
+// Submits a client command to this Raft node, forwarding it to the leader if this node is not the leader.
 func (r *Raft) ClientCommand(cmd Command) error {
 	r.mu.Lock()
 	role := r.role
@@ -121,12 +128,32 @@ func (r *Raft) ClientCommand(cmd Command) error {
 	return nil
 }
 
+// Returns a randomized election timeout for leader election timeouts.
 func (r *Raft) randomElectionTimeout() time.Duration {
 	return time.Millisecond * time.Duration(150+rand.Intn(150))
 }
 
+// Signals the node to shut down. It is safe to call multiple times
+// and from any goroutine.
+func (r *Raft) Stop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return
+	}
+	r.stopped = true
+	close(r.stopCh)
+}
+
+// Executes the Raft node's main event loop.
 func (r *Raft) Run() {
 	for {
+		select {
+		case <-r.stopCh:
+			return
+		default:
+		}
+
 		r.mu.Lock()
 		role := r.role
 		r.mu.Unlock()
@@ -144,18 +171,29 @@ func (r *Raft) Run() {
 	}
 }
 
+// Spplies any committed but not yet applied log entries to the local state machine.
 func (r *Raft) applyCommitted() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.applyCommittedLocked()
+}
+
+// Applies any newly-committed log entries to the state
+// machine. Caller must already hold r.mu.
+func (r *Raft) applyCommittedLocked() {
 	for r.commitIndex > r.lastApplied {
 		r.lastApplied++
 		r.state.Apply(r.log[r.lastApplied].Data)
 	}
 }
 
+// Runs the follower event loop, handling RPCs and election timeouts.
 func (r *Raft) RunFollower() {
 	for {
 		select {
+		case <-r.stopCh:
+			return
+
 		case <-r.electionTimer.C:
 			r.mu.Lock()
 			r.role = Candidate
@@ -207,9 +245,13 @@ func (r *Raft) RunFollower() {
 	}
 }
 
+// Runs the candidate event loop, handling election retries and incoming RPCs.
 func (r *Raft) RunCandidate() {
 	for {
 		select {
+		case <-r.stopCh:
+			return
+
 		case <-r.electionTimer.C:
 			r.startElection()
 
@@ -268,6 +310,7 @@ func (r *Raft) RunCandidate() {
 	}
 }
 
+// Runs the leader event loop, sending heartbeats and replicating client commands.
 func (r *Raft) RunLeader() {
 	r.mu.Lock()
 	for _, p := range r.peers {
@@ -283,6 +326,9 @@ func (r *Raft) RunLeader() {
 
 	for {
 		select {
+		case <-r.stopCh:
+			return
+
 		case <-ticker.C:
 			r.broadcastHeartbeat()
 
@@ -330,6 +376,7 @@ func (r *Raft) RunLeader() {
 	}
 }
 
+// Begins a new election by incrementing the term, voting for self, and requesting votes from peers.
 func (r *Raft) startElection() {
 	r.mu.Lock()
 	r.currentTerm++
@@ -380,6 +427,7 @@ func (r *Raft) startElection() {
 	}()
 }
 
+// Sends AppendEntries RPCs to all peers and processes replies.
 func (r *Raft) broadcastHeartbeat() {
 	r.mu.Lock()
 	type peerArgs struct {
@@ -458,11 +506,13 @@ func (r *Raft) maybeAdvanceCommitIndex() {
 		}
 		if count*2 > len(r.peers)+1 {
 			r.commitIndex = n
+			r.applyCommittedLocked()
 			break
 		}
 	}
 }
 
+// Processes an AppendEntries RPC and updates the log and commit state if the request is valid.
 func (r *Raft) handleAppendEntries(args AppendEntriesArgs) AppendEntriesResponse {
 	if args.term < r.currentTerm {
 		return AppendEntriesResponse{term: r.currentTerm, success: false}
@@ -488,10 +538,12 @@ func (r *Raft) handleAppendEntries(args AppendEntriesArgs) AppendEntriesResponse
 
 	if args.leaderCommit > r.commitIndex {
 		r.commitIndex = min(args.leaderCommit, uint64(len(r.log)-1))
+		r.applyCommittedLocked()
 	}
 	return AppendEntriesResponse{term: r.currentTerm, success: true}
 }
 
+// Processes a RequestVote RPC and decides whether to grant the vote based on term and log freshness.
 func (r *Raft) handleRequestVote(args RequestVoteArgs) RequestVoteResponse {
 	if args.term < r.currentTerm {
 		return RequestVoteResponse{term: r.currentTerm, voteGranted: false}
@@ -568,19 +620,80 @@ type VoteResult struct {
 	granted bool
 }
 
+// Sends an AppendEntries RPC to a peer over the configured network.
 func (r *Raft) sendAppendEntries(peer uint64, args AppendEntriesArgs) AppendEntriesResponse {
 	reply := AppendEntriesResponse{}
 	r.net.Call(peer, "Raft.AppendEntries", args, &reply)
 	return reply
 }
 
+// Sends a RequestVote RPC to a peer over the configured network.
 func (r *Raft) sendRequestVote(peer uint64, args RequestVoteArgs) RequestVoteResponse {
 	reply := RequestVoteResponse{}
 	r.net.Call(peer, "Raft.RequestVote", args, &reply)
 	return reply
 }
 
+// Safely stops and resets the election timeout timer.
 func (r *Raft) resetTimer() {
-	dur := r.randomElectionTimeout()
-	r.electionTimer.Reset(dur)
+	if !r.electionTimer.Stop() {
+		// Timer already fired (or was never running); drain a pending
+		// value if one is waiting so Reset starts from a clean state.
+		// See https://pkg.go.dev/time#Timer.Reset for why this is required
+		// when the timer's channel may have already been read by someone
+		// else, or may be about to fire concurrently with Reset.
+		select {
+		case <-r.electionTimer.C:
+		default:
+		}
+	}
+	r.electionTimer.Reset(r.randomElectionTimeout())
+}
+
+type Status struct {
+	ID          uint64
+	Role        Role
+	CurrentTerm uint64
+	LeaderId    uint64
+	LogLen      int
+	CommitIndex uint64
+	LastApplied uint64
+}
+
+func (r Role) String() string {
+	switch r {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	default:
+		return "Unknown"
+	}
+}
+
+// Returns a snapshot of the node's current role/term/log state.
+func (r *Raft) GetStatus() Status {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return Status{
+		ID:          r.id,
+		Role:        r.role,
+		CurrentTerm: r.currentTerm,
+		LeaderId:    r.leaderId,
+		LogLen:      len(r.log),
+		CommitIndex: r.commitIndex,
+		LastApplied: r.lastApplied,
+	}
+}
+
+// Get returns the current value for key in this node's applied state machine.
+func (r *Raft) Get(key string) uint64 {
+	return r.state.Get(key)
+}
+
+// ID returns the node's id.
+func (r *Raft) ID() uint64 {
+	return r.id
 }

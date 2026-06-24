@@ -10,24 +10,28 @@ type MockNetwork struct {
 	nodes map[uint64]*Raft
 }
 
+// Creates a new in-memory mock network for Raft nodes.
 func NewMockNetwork() *MockNetwork {
 	return &MockNetwork{
 		nodes: make(map[uint64]*Raft),
 	}
 }
 
+// Adds a node to the mock network so it can receive RPCs.
 func (m *MockNetwork) Register(node *Raft) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.nodes[node.id] = node
 }
 
+// Removes a node from the mock network.
 func (m *MockNetwork) Unregister(id uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.nodes, id)
 }
 
+// Routes an RPC invocation to the target node using the mock network.
 func (m *MockNetwork) Call(id uint64, rpcName string, args any, reply any) error {
 	m.mu.RLock()
 	target, ok := m.nodes[id]
