@@ -115,7 +115,7 @@ func (r *Raft) ClientCommand(cmd Command) error {
 	}
 
 	resp := ClientCommandResponse{}
-	err := r.net.Call(leaderId, "Raft.ClientCommand", ClientCommandArgs{Command: cmd}, &resp)
+	err := r.net.Call(r.id, leaderId, "Raft.ClientCommand", ClientCommandArgs{Command: cmd}, &resp)
 	if err != nil {
 		return err
 	}
@@ -623,25 +623,20 @@ type VoteResult struct {
 // Sends an AppendEntries RPC to a peer over the configured network.
 func (r *Raft) sendAppendEntries(peer uint64, args AppendEntriesArgs) AppendEntriesResponse {
 	reply := AppendEntriesResponse{}
-	r.net.Call(peer, "Raft.AppendEntries", args, &reply)
+	r.net.Call(r.id, peer, "Raft.AppendEntries", args, &reply)
 	return reply
 }
 
 // Sends a RequestVote RPC to a peer over the configured network.
 func (r *Raft) sendRequestVote(peer uint64, args RequestVoteArgs) RequestVoteResponse {
 	reply := RequestVoteResponse{}
-	r.net.Call(peer, "Raft.RequestVote", args, &reply)
+	r.net.Call(r.id, peer, "Raft.RequestVote", args, &reply)
 	return reply
 }
 
 // Safely stops and resets the election timeout timer.
 func (r *Raft) resetTimer() {
 	if !r.electionTimer.Stop() {
-		// Timer already fired (or was never running); drain a pending
-		// value if one is waiting so Reset starts from a clean state.
-		// See https://pkg.go.dev/time#Timer.Reset for why this is required
-		// when the timer's channel may have already been read by someone
-		// else, or may be about to fire concurrently with Reset.
 		select {
 		case <-r.electionTimer.C:
 		default:

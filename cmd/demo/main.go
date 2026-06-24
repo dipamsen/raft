@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/dipamsen/raft"
@@ -54,6 +55,36 @@ func main() {
 	printKV(nodes, "x")
 	printKV(nodes, "y")
 
+	fmt.Println("\nPartitioning network into [1,2] and [3,4,5]")
+	net.Partition([]uint64{1, 2}, []uint64{3, 4, 5})
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println("After partition:")
+	printCluster(nodes)
+	leaders := findLeaders(nodes)
+	if len(leaders) == 0 {
+		fmt.Println("no leader in the partitioned network")
+	} else {
+		fmt.Printf("leader(s) in partitioned network: %s\n", leaderList(leaders))
+		partitionCmd := raft.Command{Key: "p", Value: 7}
+		if err := leaders[0].ClientCommand(partitionCmd); err != nil {
+			fmt.Printf("command %+v failed during partition: %v\n", partitionCmd, err)
+		} else {
+			fmt.Printf("submitted during partition: %s = %d\n", partitionCmd.Key, partitionCmd.Value)
+		}
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println("\nAfter partition operations:")
+	printCluster(nodes)
+	printKV(nodes, "p")
+
+	fmt.Println("\nHealing network partition")
+	net.Heal()
+	time.Sleep(300 * time.Millisecond)
+	fmt.Println("After healing network:")
+	printCluster(nodes)
+	printKV(nodes, "p")
+
 	crashedID := leader.ID()
 	fmt.Printf("\nCrashing leader %d...\n", crashedID)
 	leader.Stop()
@@ -64,7 +95,7 @@ func main() {
 	waitForLeader(nodes, 3*time.Second)
 	printCluster(nodes)
 
-	println("")
+	fmt.Println()
 	newLeader := findLeader(nodes)
 	if newLeader == nil {
 		fmt.Println("no new leader elected after crash - cluster unavailable")
@@ -76,7 +107,7 @@ func main() {
 	}
 	fmt.Printf("new leader elected: node %d (old leader %d is down)\n", newLeader.ID(), crashedID)
 
-	println("")
+	fmt.Println()
 	cmd := raft.Command{Key: "z", Value: 100}
 	if err := newLeader.ClientCommand(cmd); err != nil {
 		fmt.Printf("command failed: %v\n", err)
@@ -121,19 +152,35 @@ func findLeader(nodes map[uint64]*raft.Raft) *raft.Raft {
 	return nil
 }
 
-func printCluster(nodes map[uint64]*raft.Raft) {
-	ids := make([]uint64, 0, len(nodes))
-	for id := range nodes {
-		ids = append(ids, id)
-	}
-	for i := 0; i < len(ids); i++ {
-		for j := i + 1; j < len(ids); j++ {
-			if ids[j] < ids[i] {
-				ids[i], ids[j] = ids[j], ids[i]
-			}
+func findLeaders(nodes map[uint64]*raft.Raft) []*raft.Raft {
+	leaders := make([]*raft.Raft, 0, len(nodes))
+	for _, n := range nodes {
+		if n.GetStatus().Role == raft.Leader {
+			leaders = append(leaders, n)
 		}
 	}
-	for _, id := range ids {
+	return leaders
+}
+
+func leaderList(leaders []*raft.Raft) string {
+	ids := make([]uint64, 0, len(leaders))
+	for _, l := range leaders {
+		ids = append(ids, l.ID())
+	}
+	slices.Sort(ids)
+
+	var builder string
+	for i, id := range ids {
+		if i > 0 {
+			builder += ", "
+		}
+		builder += fmt.Sprintf("%d", id)
+	}
+	return builder
+}
+
+func printCluster(nodes map[uint64]*raft.Raft) {
+	for _, id := range sortedIDs(nodes) {
 		s := nodes[id].GetStatus()
 		fmt.Printf("  node %d: role=%-9s term=%d leader=%d logLen=%d commitIndex=%d lastApplied=%d\n",
 			s.ID, s.Role, s.CurrentTerm, s.LeaderId, s.LogLen, s.CommitIndex, s.LastApplied)
@@ -158,12 +205,6 @@ func sortedIDs(nodes map[uint64]*raft.Raft) []uint64 {
 	for id := range nodes {
 		ids = append(ids, id)
 	}
-	for i := 0; i < len(ids); i++ {
-		for j := i + 1; j < len(ids); j++ {
-			if ids[j] < ids[i] {
-				ids[i], ids[j] = ids[j], ids[i]
-			}
-		}
-	}
+	slices.Sort(ids)
 	return ids
 }
