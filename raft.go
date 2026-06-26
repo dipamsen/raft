@@ -20,6 +20,8 @@ const (
 	Leader
 )
 
+const debug = true
+
 type Raft struct {
 	mu sync.Mutex
 
@@ -104,6 +106,7 @@ func (r *Raft) ClientCommand(cmd Command) error {
 		r.log = append(r.log, LogEntry{Term: term, Data: cmd})
 		r.mu.Unlock()
 		go r.broadcastHeartbeat()
+		// wait for the command to be committed, i.e.
 		return nil
 	}
 
@@ -171,7 +174,7 @@ func (r *Raft) Run() {
 	}
 }
 
-// Spplies any committed but not yet applied log entries to the local state machine.
+// Applies any committed but not yet applied log entries to the local state machine.
 func (r *Raft) applyCommitted() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -378,6 +381,9 @@ func (r *Raft) RunLeader() {
 
 // Begins a new election by incrementing the term, voting for self, and requesting votes from peers.
 func (r *Raft) startElection() {
+	if debug {
+		fmt.Printf("[ELECTION_START] node=%d term=%d t=%d\n", r.id, r.currentTerm, time.Now().UnixMicro())
+	}
 	r.mu.Lock()
 	r.currentTerm++
 	r.votedFor = r.id
@@ -421,6 +427,9 @@ func (r *Raft) startElection() {
 			}
 			if votes*2 > total {
 				r.voteResult <- VoteResult{term: term, granted: true}
+				if debug {
+					fmt.Printf("[ELECTION_WON] node=%d term=%d t=%d\n", r.id, r.currentTerm, time.Now().UnixMicro())
+				}
 				return
 			}
 		}

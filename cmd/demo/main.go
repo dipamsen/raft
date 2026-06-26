@@ -25,7 +25,7 @@ func main() {
 		go node.Run()
 	}
 
-	fmt.Println("5-node Raft cluster started")
+	fmt.Printf("5-node Raft cluster started (time=%d)\n", time.Now().UnixMicro())
 	waitForLeader(nodes, 2*time.Second)
 	printCluster(nodes)
 
@@ -55,7 +55,7 @@ func main() {
 	printKV(nodes, "x")
 	printKV(nodes, "y")
 
-	fmt.Println("\nPartitioning network into [1,2] and [3,4,5]")
+	fmt.Printf("\nPartitioning network into [1,2] and [3,4,5]. (time=%d)\n", time.Now().UnixMicro())
 	net.Partition([]uint64{1, 2}, []uint64{3, 4, 5})
 	time.Sleep(300 * time.Millisecond)
 	fmt.Println("After partition:")
@@ -78,7 +78,7 @@ func main() {
 	printCluster(nodes)
 	printKV(nodes, "p")
 
-	fmt.Println("\nHealing network partition")
+	fmt.Printf("\nHealing network partition (time=%d)\n", time.Now().UnixMicro())
 	net.Heal()
 	time.Sleep(300 * time.Millisecond)
 	fmt.Println("After healing network:")
@@ -86,7 +86,7 @@ func main() {
 	printKV(nodes, "p")
 
 	crashedID := leader.ID()
-	fmt.Printf("\nCrashing leader %d...\n", crashedID)
+	fmt.Printf("\nCrashing leader %d... (time=%d)\n", crashedID, time.Now().UnixMicro())
 	leader.Stop()
 	net.Unregister(crashedID)
 	delete(nodes, crashedID)
